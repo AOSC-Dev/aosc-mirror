@@ -1,7 +1,7 @@
 use std::{
 	fs::File,
-	io::{BufRead, BufReader},
-	path::PathBuf,
+	io::{BufRead, BufReader, Read},
+	path::{Path, PathBuf},
 	sync::Arc,
 };
 
@@ -9,6 +9,30 @@ use anyhow::{Result, bail};
 use sequoia_openpgp::{fmt::hex, types::HashAlgorithm};
 
 use crate::metadata::AptMetadataHashAlgm;
+
+pub fn get_reader(path: &dyn AsRef<Path>) -> Result<Box<BufReader<dyn Read>>> {
+	let path = path.as_ref();
+	let fd = File::options()
+		.read(true)
+		.write(false)
+		.create(false)
+		.open(path)?;
+	let bufreader = BufReader::with_capacity(128 * 1024, fd);
+	match path.extension() {
+		Some(ext) => {
+			if ext.eq_ignore_ascii_case("gz") {
+				let decoder = flate2::bufread::GzDecoder::new(bufreader);
+				Ok(Box::new(BufReader::new(decoder)))
+			} else if ext.eq_ignore_ascii_case("xz") {
+				let decoder = xz2::bufread::XzDecoder::new(bufreader);
+				Ok(Box::new(BufReader::new(decoder)))
+			} else {
+				bail!("Unsupported file extension {:?}", ext);
+			}
+		}
+		None => Ok(Box::new(bufreader)),
+	}
+}
 
 pub fn checksum_file(
 	algm: AptMetadataHashAlgm,

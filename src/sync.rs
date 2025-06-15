@@ -26,6 +26,7 @@ use crate::{
 	AppState,
 	aosc::fetch_topics,
 	config::OperationMode,
+	debian::collect_source_files,
 	metadata::{
 		AptRepoReleaseInfo, download_metadata_files, fetch_manifest, get_files,
 		split_inrelease,
@@ -191,23 +192,39 @@ async fn do_sync_inner2(j: SyncJob<'_>) -> Result<()> {
 	// Collect available files; get_files returns the chunked lists along with hashed file list
 	let rsync_url = j.rsync_url.clone();
 	let dst = j.dst.to_path_buf().clone();
+	let cur_dists_dir = dst.join(format!("dists-{}", j.timestamp));
 	let mut suites = HashMap::new();
 	for manifest in &manifests {
 		let components = manifest.components.clone();
 		suites.insert(manifest.suite.clone(), components);
 	}
 	let archs = j.archs.clone();
-	let handle = tokio::task::spawn_blocking(move || {
-		get_files(dst, suites, archs, j.timestamp, j.threads)
-	});
-	let (hashset, files) = handle.await??;
+	let suites2 = suites.clone();
+	let handle =
+		tokio::task::spawn_blocking(move || get_files(dst, suites2, archs, j.timestamp));
+	let mut files_collected = handle.await??;
+	if j.mode == OperationMode::Debian {
+		let source_files = collect_source_files(cur_dists_dir, suites, j.threads).await?;
+		files_collected.extend(source_files);
+	}
+
+	info!("Collected {} files in total.", files_collected.len());
+	files_collected.sort();
+	let hashset: HashSet<String> = files_collected.iter().cloned().collect();
+
+	// Distribute files into N lists
+	let mut queues = Vec::new();
+	let each_size = files_collected.len().div_ceil(j.threads as usize);
+	files_collected
+		.chunks(each_size)
+		.for_each(|x| queues.push(x.to_vec()));
 
 	// Generate file lists for rsync
 	let tmp_dir = j.dst.join(".tmp");
 	create_dir_all(&tmp_dir).await?;
 	info!("Writing file lists to {} ...", tmp_dir.display());
 	let mut filelists = Vec::new();
-	for (idx, queue) in files.into_iter().enumerate() {
+	for (idx, queue) in queues.into_iter().enumerate() {
 		let path = tmp_dir.join(format!("file-{}-{}.txt", j.timestamp, idx + 1));
 		let fd = File::options()
 			.create(true)
@@ -237,8 +254,8 @@ async fn do_sync_inner2(j: SyncJob<'_>) -> Result<()> {
 			fireup_rsync(rsync_url, dst, list).await
 		}));
 	}
-	let iter = handles.into_iter();
-	for r in iter {
+
+	for r in handles.into_iter() {
 		r.await??;
 	}
 
@@ -356,7 +373,6 @@ fn remove_unused_files(
 async fn download_metadata(j: &SyncJob<'_>) -> Result<Vec<AptRepoReleaseInfo>> {
 	let mut manifests = Vec::new();
 	for suite in &j.suites {
-		create_dir_all(j.dst.join(format!("dists-{}/{}/", j.timestamp, suite))).await?;
 		let (inrelease_content, release) =
 			fetch_manifest(j.http_url.clone(), suite.clone(), j.client).await?;
 		let manifest = if let Some(s) = &inrelease_content {

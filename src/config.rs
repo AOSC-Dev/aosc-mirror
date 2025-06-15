@@ -36,7 +36,11 @@ pub struct AppConfig {
 	/// Root directory of the mirror
 	pub mirror_root: PathBuf,
 	/// Also mirror the topics (AOSC only)
+	#[serde(default = "default_false")]
 	pub mirror_topics: bool,
+	/// Also mirror the source files (deb-src, Debian mode only)
+	#[serde(default = "default_false")]
+	pub mirror_sources: bool,
 	/// Certificate store
 	pub keyring_dir: PathBuf,
 	/// Suites to mirror (Debian, Ubuntu, etc.)
@@ -47,6 +51,10 @@ pub struct AppConfig {
 	pub archs: Vec<String>,
 	/// Number of parallel jobs
 	pub parallel_jobs: u8,
+}
+
+fn default_false() -> bool {
+	false
 }
 
 fn default_suites() -> Vec<String> {
@@ -67,13 +75,6 @@ fn default_archs() -> Vec<String> {
 
 pub fn check_config(config: &AppConfig) -> Vec<anyhow::Error> {
 	let mut errors = Vec::new();
-	// TODO list for Debian mode:
-	// - deb-src mirroring
-	// - i18n and icons support
-	// - Use async_compression for reading gzipped Packages files
-	if config.mode == OperationMode::Debian {
-		errors.push(anyhow!("Debian mode is currently unfinished"));
-	}
 	if !config.mirror_url.as_str().ends_with('/') {
 		errors.push(anyhow!(
 			"Mirror URL must end with a slash, otherwise the path will be overridden"

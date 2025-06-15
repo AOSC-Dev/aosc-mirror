@@ -1,9 +1,4 @@
-use std::{
-	collections::{HashMap, HashSet},
-	io::{BufRead, BufReader},
-	path::PathBuf,
-	sync::Arc,
-};
+use std::{collections::HashMap, io::BufRead, path::PathBuf, sync::Arc};
 
 use anyhow::{Context, Result, anyhow, bail};
 use deb822_lossless::Deb822;
@@ -18,7 +13,10 @@ use tokio::{
 
 use url::Url;
 
-use crate::{config::OperationMode, utils::checksum_file};
+use crate::{
+	config::OperationMode,
+	utils::{checksum_file, get_reader},
+};
 
 const MAGIC: &str = "-----BEGIN PGP SIGNED MESSAGE-----";
 const SIG_MAGIC: &str = "-----BEGIN PGP SIGNATURE-----";
@@ -374,8 +372,7 @@ pub async fn download_metadata_files(
 			.context("Unable to download metadata files")
 		}));
 	}
-	let iter = handles.into_iter();
-	for r in iter {
+	for r in handles.into_iter() {
 		r.await??;
 	}
 	Ok(())
@@ -466,8 +463,7 @@ pub fn get_files(
 	suites: HashMap<String, Vec<String>>,
 	archs: Vec<String>,
 	timestamp: i64,
-	num_queues: u8,
-) -> Result<(HashSet<String>, Vec<PackageFileList>)> {
+) -> Result<PackageFileList> {
 	info!("Collecting files from {} dists ...", suites.len());
 	let mut files = Vec::new();
 	for suite in &suites {
@@ -475,22 +471,23 @@ pub fn get_files(
 			let temp_dists_dir = mirror_root
 				.join(format!("dists-{}/{}/{}/", timestamp, suite.0, component));
 			for arch in &archs {
-				let packages_path =
-					temp_dists_dir.join(format!("binary-{}/Packages", arch));
-				if !packages_path.exists() || !packages_path.is_file() {
+				let packages_path = vec![
+					temp_dists_dir.join(format!("binary-{}/Packages.gz", arch)),
+					temp_dists_dir.join(format!("binary-{}/Packages.xz", arch)),
+					temp_dists_dir.join(format!("binary-{}/Packages", arch)),
+				];
+				let packages_path = packages_path
+					.into_iter()
+					.find(|p| p.exists() && p.is_file());
+				if packages_path.is_none() {
 					warn!(
 						"Component {} in suite {} doesn't support architecture {}. Skipping.",
 						component, suite.0, arch
 					);
 					continue;
 				}
-				let fd = std::fs::File::options()
-					.create(false)
-					.append(false)
-					.read(true)
-					.write(false)
-					.open(&packages_path)?;
-				let reader = BufReader::with_capacity(256 * 1024, fd);
+				let packages_path = packages_path.unwrap();
+				let reader = get_reader(&packages_path)?;
 				let mut lines = reader.lines();
 				// Not using deb822 to save energy.
 				while let Some(Ok(l)) = lines.next() {
@@ -510,17 +507,7 @@ pub fn get_files(
 	if files.is_empty() {
 		bail!("Internal error: No files collected");
 	}
-	files.sort();
-	let hashset: HashSet<String> = files.iter().cloned().collect();
-	info!("There are {} files currently known to us.", files.len());
-	// Distribute files
-	// It's better to split this list into chunks, rather than round-robin them.
-	// This is for reducing the server load (rsync treats file lists specially).
-	let mut queues = Vec::new();
-	let each_size = files.len().div_ceil(num_queues as usize);
-	files.chunks(each_size)
-		.for_each(|x| queues.push(x.to_vec()));
-	Ok((hashset, queues))
+	Ok(files)
 }
 
 #[tokio::test]

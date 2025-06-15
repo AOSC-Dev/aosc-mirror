@@ -1,4 +1,10 @@
-use std::{env, fs::read_to_string, net::SocketAddr, path::{Path, PathBuf}, sync::Arc};
+use std::{
+	env,
+	fs::read_to_string,
+	net::SocketAddr,
+	path::{Path, PathBuf},
+	sync::Arc,
+};
 
 use aosc_mirror::{metadata::split_inrelease, server::Status, sync::do_sync_inner, *};
 
@@ -46,7 +52,7 @@ pub struct Cmdline {
 fn check_repo(root: &dyn AsRef<Path>, manifests: Vec<AptRepoReleaseInfo>) -> bool {
 	for manifest in manifests {
 		let suite_dir = root.as_ref().join("dists").join(manifest.suite);
-		let files = manifest.metadata_info.iter().next().unwrap();
+		let files = manifest.metadata_info.first().unwrap();
 		for f in &files.files {
 			let full_path = suite_dir.join(&f.path);
 			if !full_path.is_file() {
@@ -219,7 +225,7 @@ async fn main() -> Result<()> {
 			info!("Checking the repository ...");
 			if !check_repo(&config.mirror_root, manifests) {
 				bail!("Looks like you don't have a full copy of the mirrored repository.\n".to_owned() + 
-				&"Please run the following command to initialize a full copy:\n\n".to_owned() +
+				"Please run the following command to initialize a full copy:\n\n" +
 				&format!("{} -c {} sync", argv0, config_file.display()));
 			};
 			// Start the server

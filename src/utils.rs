@@ -8,7 +8,7 @@ use std::{
 use anyhow::{Result, bail};
 use sequoia_openpgp::{fmt::hex, types::HashAlgorithm};
 
-use crate::metadata::AptMetadataHashAlgm;
+use crate::metadata::{AptMetadataHashAlgm, FileEntry};
 
 pub fn get_reader(path: &dyn AsRef<Path>) -> Result<Box<BufReader<dyn Read>>> {
 	let path = path.as_ref();
@@ -32,6 +32,31 @@ pub fn get_reader(path: &dyn AsRef<Path>) -> Result<Box<BufReader<dyn Read>>> {
 		}
 		None => Ok(Box::new(bufreader)),
 	}
+}
+
+/// Scan the mirror root, returns a list of files that is not present in the
+/// mirror root.
+/// *WARNING* We assume that every file in the local disk are identical to
+/// the one in the remote. Checksuming hundreds of thousands of files is
+/// VERY expensive. We only add it to the delta if either the file does not
+/// exist, or the size of the file is not correct (like what rsync normally
+/// does - checksums are performed if only it is instructed to do so).
+pub fn scan_delta(root: &dyn AsRef<Path>, list: &Vec<FileEntry>) -> Vec<String> {
+	let root = root.as_ref();
+	let mut files = Vec::new();
+	for f in list {
+		let full_path = root.join(&f.path);
+		if !full_path.exists() {
+			files.push(f.path.clone());
+		} else if let Ok(m) = full_path.metadata() {
+			if m.len() != f.size {
+				files.push(f.path.clone());
+			}
+		} else {
+			files.push(f.path.clone());
+		}
+	}
+	files
 }
 
 pub fn checksum_file(

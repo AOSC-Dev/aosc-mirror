@@ -21,10 +21,16 @@ use crate::{
 const MAGIC: &str = "-----BEGIN PGP SIGNED MESSAGE-----";
 const SIG_MAGIC: &str = "-----BEGIN PGP SIGNATURE-----";
 
-// The only thing we are interested in the Packages file is the path of the deb package.
+// The only thing we are interested in the Packages file is the path of the
+// deb package and its size (for fast delta scanning).
 // Integrity are verified by rsync.
-pub type PackageFileEntry = String;
-pub type PackageFileList = Vec<PackageFileEntry>;
+#[derive(Clone)]
+pub struct FileEntry {
+	pub path: String,
+	pub size: u64,
+}
+
+pub type PackageFileList = Vec<FileEntry>;
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum AptMetadataHashAlgm {
@@ -489,17 +495,31 @@ pub fn get_files(
 				let packages_path = packages_path.unwrap();
 				let reader = get_reader(&packages_path)?;
 				let mut lines = reader.lines();
+				let mut ent_path = String::new();
+				let mut ent_size: u64 = 0;
 				// Not using deb822 to save energy.
 				while let Some(Ok(l)) = lines.next() {
-					if !l.starts_with("Filename: ") {
-						continue;
+					if l.starts_with("Filename: ") {
+						let path = l.split_whitespace().nth(1).context(
+							"Expected Filename: value not found",
+						)?;
+						debug!("New file: {}", path);
+						ent_path = path.into();
 					}
-					let path = l
-						.split_whitespace()
-						.nth(1)
-						.context("Invalid Packages content")?;
-					debug!("New file: {}", path);
-					files.push(path.into());
+					if l.starts_with("Size: ") {
+						let size = l.split_whitespace().nth(1).context(
+							"Expected Size: value not found",
+						)?;
+						ent_size = size
+							.parse()
+							.context("Invalid Size: value")?;
+					}
+					if l.is_empty() {
+						files.push(FileEntry {
+							path: ent_path.clone(),
+							size: ent_size,
+						});
+					}
 				}
 			}
 		}

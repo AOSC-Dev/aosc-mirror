@@ -3,9 +3,9 @@
 use std::{collections::HashMap, io::BufRead, path::PathBuf};
 
 use anyhow::{Context, Result};
-use log::{info, warn};
+use log::warn;
 
-use crate::utils::get_reader;
+use crate::{metadata::FileEntry, utils::get_reader};
 
 #[allow(non_snake_case)]
 struct TracingInfo {
@@ -26,7 +26,7 @@ const TRACE_DIR: &str = "project/trace";
 // Each entry in the collection is a filename, not relative path.
 // Well, after a little bit of thinking, I think a partial parser would be suffice.
 // Let's do it then!
-fn parse_files_in_sources(path: PathBuf) -> Result<Vec<String>> {
+fn parse_files_in_sources(path: PathBuf) -> Result<Vec<FileEntry>> {
 	#[derive(Copy, Clone, PartialEq)]
 	enum State {
 		Normal,
@@ -38,9 +38,9 @@ fn parse_files_in_sources(path: PathBuf) -> Result<Vec<String>> {
 
 	let mut state = State::Normal;
 	let lines = reader.lines();
-	let mut tmp_filenames = Vec::new();
+	let mut tmp_files = Vec::new();
 	let mut rel_path = String::new();
-	for line in lines {
+	for (idx, line) in lines.enumerate() {
 		let line = if let Ok(l) = line {
 			l
 		} else {
@@ -50,12 +50,15 @@ fn parse_files_in_sources(path: PathBuf) -> Result<Vec<String>> {
 		// An empty line is a 'paragraph' divisor
 		if line.is_empty() {
 			// Process the files parsed from the last paragraph
-			let full_paths = tmp_filenames
+			let full_paths = tmp_files
 				.iter()
-				.map(|name| format!("{}/{}", rel_path, name))
+				.map(|(entry, size)| FileEntry {
+					path: format!("{}/{}", rel_path, entry),
+					size: *size,
+				})
 				.collect::<Vec<_>>();
 			files.extend(full_paths);
-			tmp_filenames.clear();
+			tmp_files.clear();
 			state = State::InParagraph;
 			continue;
 		}
@@ -78,12 +81,19 @@ fn parse_files_in_sources(path: PathBuf) -> Result<Vec<String>> {
 			continue;
 		}
 		if state == State::InFiles {
-			let filename = line
-				.split_whitespace()
-				.last()
-				.context("Invalid Sources entry")?
-				.to_string();
-			tmp_filenames.push(filename);
+			let mut fields = line.split_whitespace();
+			let size = fields.nth(1).context(format!(
+				"Expecting file size in a file entry in the Sources file {}:{}",
+				path.display(),
+				idx
+			))?;
+			let filename = fields.last().context("Invalid Sources entry")?.to_owned();
+			let size: u64 = size.parse().context(format!(
+				"Invalid size field in {}:{}",
+				path.display(),
+				idx
+			))?;
+			tmp_files.push((filename, size));
 		}
 	}
 	Ok(files)
@@ -94,7 +104,7 @@ pub async fn collect_source_files(
 	dists: PathBuf,
 	suites: HashMap<String, Vec<String>>,
 	num_queues: u8,
-) -> Result<Vec<String>> {
+) -> Result<Vec<FileEntry>> {
 	let mut files = Vec::new();
 	let mut sources_files = Vec::new();
 	for suite in suites {
@@ -102,14 +112,12 @@ pub async fn collect_source_files(
 		let suite_path = dists.join(&suite_name);
 		for component in suite.1 {
 			let mut source_path = suite_path.join(&component).join("source/Sources.gz");
-			info!("Trying source file at {}", &source_path.display());
 			if !source_path.is_file() {
 				source_path = suite_path.join(&component).join("source/Sources.xz");
-				info!("Trying source file at {}", &source_path.display());
 			}
 			if !source_path.is_file() {
 				warn!(
-					"Component {} in suite {} does not provide deb-src sources.",
+					"Component {} in suite {} does not provide deb-src sourcs.",
 					component, suite_name
 				);
 				continue;
@@ -129,7 +137,7 @@ pub async fn collect_source_files(
 	for queue in queues {
 		handles.push(tokio::task::spawn_blocking(move || {
 			use anyhow::Ok;
-			let mut results: Vec<String> = Vec::new();
+			let mut results = Vec::new();
 			for file in queue {
 				let result = parse_files_in_sources(file)?;
 				results.extend(result);

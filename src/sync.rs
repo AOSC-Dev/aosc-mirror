@@ -32,6 +32,7 @@ use crate::{
 		split_inrelease,
 	},
 	server::{Status, SyncRequestBody, SyncRequestResponse},
+	utils::scan_delta,
 	verify::{PgpKeyringStore, verify_pgp_signature, verify_request_signature},
 };
 
@@ -40,6 +41,7 @@ pub struct SyncJob<'a> {
 	pub rsync_url: &'a Url,
 	pub http_url: &'a Url,
 	pub mode: OperationMode,
+	pub mirror_sources: bool,
 	pub suites: Vec<String>,
 	pub archs: Vec<String>,
 	pub threads: u8,
@@ -156,6 +158,7 @@ pub async fn do_sync_inner(s: Arc<RwLock<AppState>>, timestamp: i64) {
 		rsync_url: &c.mirror_url,
 		http_url: &c.http_url,
 		mode: c.mode,
+		mirror_sources: c.mirror_sources,
 		suites,
 		archs: c.archs.clone(),
 		dst: &c.mirror_root,
@@ -203,62 +206,86 @@ async fn do_sync_inner2(j: SyncJob<'_>) -> Result<()> {
 	let handle =
 		tokio::task::spawn_blocking(move || get_files(dst, suites2, archs, j.timestamp));
 	let mut files_collected = handle.await??;
-	if j.mode == OperationMode::Debian {
+	if j.mode == OperationMode::Debian && j.mirror_sources {
 		let source_files = collect_source_files(cur_dists_dir, suites, j.threads).await?;
 		files_collected.extend(source_files);
 	}
 
+	let hashset: HashSet<String> = files_collected.iter().map(|e| e.path.clone()).collect();
+	files_collected.sort_by_key(|e| e.path.clone());
 	info!("Collected {} files in total.", files_collected.len());
-	files_collected.sort();
-	let hashset: HashSet<String> = files_collected.iter().cloned().collect();
-
-	// Distribute files into N lists
-	let mut queues = Vec::new();
-	let each_size = files_collected.len().div_ceil(j.threads as usize);
+	info!("Scanning for incremental deltas ...");
+	// Scan the files for incremental deltas, concurrently.
+	let mut scan_queues = Vec::new();
+	let actual_threads = files_collected.len().clamp(1, j.threads.into());
+	let each_size = files_collected.len().div_ceil(actual_threads as usize);
 	files_collected
 		.chunks(each_size)
-		.for_each(|x| queues.push(x.to_vec()));
+		.for_each(|x| scan_queues.push(x.to_vec()));
+	let mut delta = Vec::new();
+	let mut tasks = Vec::new();
+	for queue in scan_queues {
+		let root = j.dst.to_owned();
+		tasks.push(tokio::task::spawn_blocking(move || {
+			scan_delta(&root, &queue)
+		}))
+	}
+	for task in tasks {
+		delta.extend(task.await?);
+	}
+	// We don't need the sizes any more.
+	drop(files_collected);
 
-	// Generate file lists for rsync
-	let tmp_dir = j.dst.join(".tmp");
-	create_dir_all(&tmp_dir).await?;
-	info!("Writing file lists to {} ...", tmp_dir.display());
-	let mut filelists = Vec::new();
-	for (idx, queue) in queues.into_iter().enumerate() {
-		let path = tmp_dir.join(format!("file-{}-{}.txt", j.timestamp, idx + 1));
-		let fd = File::options()
-			.create(true)
-			.truncate(true)
-			.append(false)
-			.write(true)
-			.open(&path)
-			.await?;
-		let mut writer = BufWriter::with_capacity(128 * 1024, fd);
-		for f in queue {
-			writer.write_all(f.as_bytes())
-				.await
-				.context("Failed to write file lists")?;
-			writer.write_all(b"\n").await?;
+	if !delta.is_empty() {
+		info!("Scan complete. {} files to download.", delta.len());
+		// Distribute files into N lists
+		let mut queues = Vec::new();
+		let each_size = delta.len().div_ceil(actual_threads as usize);
+		delta.chunks(each_size)
+			.for_each(|x| queues.push(x.to_vec()));
+
+		// Generate file lists for rsync
+		let tmp_dir = j.dst.join(".tmp");
+		create_dir_all(&tmp_dir).await?;
+		info!("Writing file lists to {} ...", tmp_dir.display());
+		let mut filelists = Vec::new();
+		for (idx, queue) in queues.into_iter().enumerate() {
+			let path = tmp_dir.join(format!("files-{}-{}.txt", j.timestamp, idx + 1));
+			let fd = File::options()
+				.create(true)
+				.truncate(true)
+				.append(false)
+				.write(true)
+				.open(&path)
+				.await?;
+			let mut writer = BufWriter::with_capacity(128 * 1024, fd);
+			for f in queue {
+				writer.write_all(f.as_bytes())
+					.await
+					.context("Failed to write file lists")?;
+				writer.write_all(b"\n").await?;
+			}
+			writer.flush().await?;
+			filelists.push(path);
 		}
-		writer.flush().await?;
-		filelists.push(path);
-	}
 
-	// Fire up N instances of rsync
-	let mut handles = Vec::new();
-	info!("Starting up {} rsync instances ...", j.threads);
-	for list in filelists {
-		let rsync_url = rsync_url.clone();
-		let dst = j.dst.to_path_buf();
-		handles.push(tokio::task::spawn(async move {
-			fireup_rsync(rsync_url, dst, list).await
-		}));
-	}
+		// Fire up N instances of rsync
+		let mut handles = Vec::new();
+		info!("Starting up {} rsync instances ...", j.threads);
+		for list in filelists {
+			let rsync_url = rsync_url.clone();
+			let dst = j.dst.to_path_buf();
+			handles.push(tokio::task::spawn(async move {
+				fireup_rsync(rsync_url, dst, list).await
+			}));
+		}
 
-	for r in handles.into_iter() {
-		r.await??;
+		for r in handles.into_iter() {
+			r.await??;
+		}
+	} else {
+		info!("The mirror is up to date - nothing to download.");
 	}
-
 	// Update the symlink
 	let symlink_dists = j.dst.join("dists");
 	let tmp_dists = j.dst.join(format!("dists-{}", j.timestamp));
@@ -348,11 +375,11 @@ fn remove_unused_files(
 			continue;
 		};
 		if !known_files.contains(rel_str) {
-			info!("Removed {}", rel_str);
 			if let Err(e) = remove_file(entry.path()) {
 				warn!("Unable to remove {}: {}", entry.path().display(), e);
 				continue;
 			}
+			info!("Removed {}", rel_str);
 			cnt += 1;
 		}
 	}

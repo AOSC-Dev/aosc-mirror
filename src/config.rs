@@ -144,13 +144,13 @@ pub fn check_config(config: &AppConfig) -> Vec<anyhow::Error> {
 				config.mirror_root.display()
 			));
 		}
-		if let Err(e) = create_dir_all(&config.mirror_root) {
-			errors.push(anyhow!(
-				"Can't create the mirror root directory {}: {}",
-				config.mirror_root.display(),
-				e
-			));
-		}
+	} else if let Err(e) = create_dir_all(&config.mirror_root) {
+		errors.push(anyhow!(
+			"Can't create the mirror root directory {}: {}",
+			config.mirror_root.display(),
+			e
+		));
+		return errors;
 	}
 	let path = config.mirror_root.join(".testfile");
 	if let Err(e) = File::create_new(&path) {

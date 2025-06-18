@@ -106,7 +106,9 @@ pub async fn do_sync(
 			.body(serde_json::to_string_pretty(&res).unwrap())
 			.unwrap();
 	}
-	tokio::spawn(async move { do_sync_inner(s, payload.timestamp).await });
+	// tokio::spawn(async move { do_sync_inner(s, payload.timestamp).await });
+	do_sync_inner(s, payload.timestamp).await;
+
 	let res = SyncRequestResponse {
 		status: Status::Success,
 		message: "Sync job started".into(),
@@ -394,6 +396,7 @@ fn remove_unused_files(
 		))?;
 	}
 	info!("Finished removing unused files.");
+	drop(known_files);
 	Ok(())
 }
 
@@ -442,6 +445,7 @@ async fn download_metadata(j: &SyncJob<'_>) -> Result<Vec<AptRepoReleaseInfo>> {
 				.open(&path)
 				.await?;
 			fd.write_all(s.as_bytes()).await?;
+			fd.flush().await?;
 		}
 		if let Some((content, sig)) = &release {
 			let path =
@@ -462,6 +466,7 @@ async fn download_metadata(j: &SyncJob<'_>) -> Result<Vec<AptRepoReleaseInfo>> {
 				.open(&path)
 				.await?;
 			fd.write_all(sig.as_bytes()).await?;
+			fd.flush().await?;
 		}
 	}
 	Ok(manifests)

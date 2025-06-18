@@ -55,7 +55,7 @@ fn check_repo(root: &dyn AsRef<Path>, manifests: Vec<AptRepoReleaseInfo>) -> boo
 		let files = manifest.metadata_info.first().unwrap();
 		for f in &files.files {
 			let full_path = suite_dir.join(&f.path);
-			if !full_path.is_file() {
+			if full_path.extension().is_some_and(|e| ["gz", "xz", "bz2"].iter().find(|x| e.eq_ignore_ascii_case(x)).is_some()) && !full_path.is_file() {
 				return false;
 			}
 		}

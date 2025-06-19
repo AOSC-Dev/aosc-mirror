@@ -3,12 +3,12 @@ use std::{collections::HashMap, io::BufRead, path::PathBuf, sync::Arc};
 use anyhow::{Context, Result, anyhow, bail};
 use deb822_lossless::Deb822;
 use futures_util::StreamExt;
-use log::{debug, info, warn};
+use log::{debug, info};
 use reqwest::Client;
 use sequoia_openpgp::types::HashAlgorithm;
 use tokio::{
-	fs::{File, create_dir_all, symlink},
-	io::{AsyncWriteExt, BufWriter, copy},
+	fs::{create_dir_all, symlink, File},
+	io::{copy, AsyncWriteExt, BufWriter}, task::JoinSet,
 };
 
 use url::Url;
@@ -253,19 +253,33 @@ async fn download_metadata_inner(
 				.await?
 				.is_ok()
 			{
-				info!(
-					"[{}/{}] '{}' is up to date.",
-					f.1.0,
-					total_files,
-					rel_path.display()
-				);
-				tokio::fs::copy(local_file.as_path(), tmpdist_local_file.as_path())
-					.await
-					.context(format!(
-						"Failed to copy '{}' to '{}'",
-						local_file.display(),
-						tmpdist_local_file.display()
-					))?;
+				tokio::task::spawn_blocking(move || {
+					info!(
+						"[{}/{}] '{}' is up to date.",
+						f.1.0,
+						total_files,
+						rel_path.display()
+					);
+					std::fs::copy(local_file.as_path(), tmpdist_local_file.as_path())
+						.context(format!(
+							"Failed to copy '{}' to '{}'",
+							local_file.display(),
+							tmpdist_local_file.display()
+						))
+				}).await??;
+				// info!(
+				// 	"[{}/{}] '{}' is up to date.",
+				// 	f.1.0,
+				// 	total_files,
+				// 	rel_path.display()
+				// );
+				// tokio::fs::copy(local_file.as_path(), tmpdist_local_file.as_path())
+				// 	.await
+				// 	.context(format!(
+				// 		"Failed to copy '{}' to '{}'",
+				// 		local_file.display(),
+				// 		tmpdist_local_file.display()
+				// 	))?;
 				continue;
 			};
 		}
@@ -362,7 +376,7 @@ pub async fn download_metadata_files(
 		"Downloading {} files with {} threads ...",
 		idx, parallel_jobs
 	);
-	let mut handles = Vec::new();
+	let mut handles = JoinSet::new();
 	for (i, q) in queues.into_iter().enumerate() {
 		let base_url = base_url.clone();
 		let dst = dst.clone();
@@ -370,17 +384,18 @@ pub async fn download_metadata_files(
 		let suite = suite.clone();
 		let algo = info.hash_algo;
 		debug!("Spawning thread {} with {} files", i, q.len());
-		handles.push(tokio::spawn(async move {
+		handles.spawn(async move {
 			download_metadata_inner(
 				base_url, q, algo, timestamp, dst, suite, client, idx,
 			)
 			.await
 			.context("Unable to download metadata files")
-		}));
+		});
 	}
-	for r in handles.into_iter() {
-		r.await??;
-	}
+	while let Some(r) = handles.join_next().await {
+		r??;
+	};
+	info!("Finished downloading metadata.");
 	Ok(())
 }
 
@@ -485,14 +500,12 @@ pub fn get_files(
 				let packages_path = packages_path
 					.into_iter()
 					.find(|p| p.exists() && p.is_file());
-				if packages_path.is_none() {
-					warn!(
-						"Component {} in suite {} doesn't support architecture {}. Skipping.",
-						component, suite.0, arch
-					);
+				let packages_path = if let Some(p) = packages_path {
+					info!("Parsing {}", p.display());
+					p
+				} else {
 					continue;
-				}
-				let packages_path = packages_path.unwrap();
+				};
 				let reader = get_reader(&packages_path)?;
 				let mut lines = reader.lines();
 				let mut ent_path = String::new();

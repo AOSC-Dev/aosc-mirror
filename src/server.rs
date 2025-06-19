@@ -8,7 +8,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
-use crate::{AppState, sync::do_sync};
+use crate::{sync::do_sync, AppState};
 
 #[derive(Copy, Clone, Deserialize, PartialEq, Serialize, Debug)]
 #[serde(rename_all = "lowercase")]
@@ -48,10 +48,15 @@ pub async fn status(State(s): State<Arc<RwLock<AppState>>>) -> String {
 	.unwrap()
 }
 
+async fn exit() {
+	std::process::exit(0);
+}
+
 pub fn build_server(s: Arc<RwLock<AppState>>) -> Router {
 	// let service = do_sync.with_state(s.clone()).into_make_service_with_connect_info::<SocketAddr>();
 	Router::new()
 		.route("/do-sync", post(do_sync))
 		.route("/status", get(status))
+		.route("/exit", post(exit))
 		.with_state(s)
 }

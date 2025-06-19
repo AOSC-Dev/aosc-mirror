@@ -31,3 +31,6 @@ toml = "0.8.22"
 url = { version = "2.5.4", features = ["serde"] }
 walkdir = "2.5.0"
 xz2 = "0.1.7"
+
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = "0.6"

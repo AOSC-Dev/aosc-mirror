@@ -4,6 +4,7 @@ use std::{collections::HashMap, io::BufRead, path::PathBuf};
 
 use anyhow::{Context, Result};
 use log::warn;
+use tokio::task::JoinSet;
 
 use crate::{metadata::FileEntry, utils::get_reader};
 
@@ -133,9 +134,9 @@ pub async fn collect_source_files(
 		let queue = &mut queues[idx % num_queues as usize];
 		queue.push(sources_file);
 	}
-	let mut handles = Vec::new();
+	let mut handles = JoinSet::new();
 	for queue in queues {
-		handles.push(tokio::task::spawn_blocking(move || {
+		handles.spawn_blocking(move || {
 			use anyhow::Ok;
 			let mut results = Vec::new();
 			for file in queue {
@@ -143,10 +144,10 @@ pub async fn collect_source_files(
 				results.extend(result);
 			}
 			Ok(results)
-		}));
+		});
 	}
-	for r in handles.into_iter() {
-		files.extend(r.await??)
+	while let Some(r) = handles.join_next().await {
+		files.append(&mut r??);
 	}
 	Ok(files)
 }

@@ -23,17 +23,9 @@ use tokio::{
 use url::Url;
 
 use crate::{
-	AppState,
-	aosc::fetch_topics,
-	config::OperationMode,
-	debian::collect_source_files,
-	metadata::{
-		AptRepoReleaseInfo, download_metadata_files, fetch_manifest, get_files,
-		split_inrelease,
-	},
-	server::{Status, SyncRequestBody, SyncRequestResponse},
-	utils::scan_delta,
-	verify::{PgpKeyringStore, verify_pgp_signature, verify_request_signature},
+	aosc::fetch_topics, config::OperationMode, debian::collect_source_files, metadata::{
+		download_metadata_files, fetch_manifest, get_files, split_inrelease, AptRepoReleaseInfo
+	}, server::{Status, SyncRequestBody, SyncRequestResponse}, utils::scan_delta, verify::{verify_pgp_signature, verify_request_signature, PgpKeyringStore}, AppState
 };
 
 #[derive(Debug, Clone)]
@@ -59,8 +51,8 @@ pub async fn do_sync(
 ) -> Response<String> {
 	info!("Got request from {}", addr);
 	let s2 = s.clone();
-	let lock2 = s2.read().await;
-	if !lock2.config.skip_verification {
+	let lock = s2.read().await;
+	if !lock.config.skip_verification {
 		// Verify signatures
 		if payload.signature.is_empty() {
 			info!("Got empty signature, rejecting.");
@@ -77,7 +69,7 @@ pub async fn do_sync(
 		if verify_request_signature(
 			&payload.timestamp.to_string(),
 			sig,
-			&lock2.server_pubkeys,
+			&lock.server_pubkeys,
 		)
 		.is_err()
 		{
@@ -95,7 +87,7 @@ pub async fn do_sync(
 	} else {
 		warn!("Testing mode is enabled! Skipping signature verification.");
 	}
-	if lock2.syncing {
+	if lock.syncing {
 		info!("Sync is already started, rejecting.");
 		let res = SyncRequestResponse {
 			status: Status::Failed,
@@ -106,8 +98,19 @@ pub async fn do_sync(
 			.body(serde_json::to_string_pretty(&res).unwrap())
 			.unwrap();
 	}
-	// tokio::spawn(async move { do_sync_inner(s, payload.timestamp).await });
-	do_sync_inner(s, payload.timestamp).await;
+	let h = tokio::spawn(async move { do_sync_inner(s, payload.timestamp).await });
+	if let Err(e) = lock.sender.send(h).await {
+		error!("Can not send the handle to the consumer: {}", e);
+		let res = SyncRequestResponse {
+			status: Status::Failed,
+			message: format!("Internal error: Unable to consume the spawned task: {}", e)
+		};
+		return Response::builder()
+			.status(400)
+			.body(serde_json::to_string_pretty(&res).unwrap())
+			.unwrap();
+	};
+	drop(lock);
 
 	let res = SyncRequestResponse {
 		status: Status::Success,
@@ -136,7 +139,6 @@ pub async fn do_sync_inner(s: Arc<RwLock<AppState>>, timestamp: i64) {
 	let c = lock.config.clone();
 	let client = lock.client.clone();
 	drop(lock);
-
 	let suites = match c.mode {
 		OperationMode::AOSC => {
 			if !c.mirror_topics {
@@ -205,12 +207,13 @@ async fn do_sync_inner2(j: SyncJob<'_>) -> Result<()> {
 	}
 	let archs = j.archs.clone();
 	let suites2 = suites.clone();
-	let handle =
-		tokio::task::spawn_blocking(move || get_files(dst, suites2, archs, j.timestamp));
-	let mut files_collected = handle.await??;
+	let mut files_collected =
+		tokio::task::spawn_blocking(move || get_files(dst, suites2, archs, j.timestamp)).await??;
 	if j.mode == OperationMode::Debian && j.mirror_sources {
-		let source_files = collect_source_files(cur_dists_dir, suites, j.threads).await?;
-		files_collected.extend(source_files);
+		// let source_files = collect_source_files(cur_dists_dir, suites, j.threads).await?;
+		// files_collected.extend(source_files);
+		let mut source_files = collect_source_files(cur_dists_dir, suites, j.threads).await?;
+		files_collected.append(&mut source_files);
 	}
 
 	let hashset: HashSet<String> = files_collected.iter().map(|e| e.path.clone()).collect();
@@ -434,6 +437,7 @@ async fn download_metadata(j: &SyncJob<'_>) -> Result<Vec<AptRepoReleaseInfo>> {
 		)
 		.await?;
 		manifests.push(manifest);
+		info!("Saving InRelease/Release ...");
 		// Integrity of the metadata files are verified, let's save the InRelease and Release/Release.gpg.
 		if let Some(s) = &inrelease_content {
 			let path =

@@ -7,8 +7,9 @@ use log::{debug, info};
 use reqwest::Client;
 use sequoia_openpgp::types::HashAlgorithm;
 use tokio::{
-	fs::{create_dir_all, symlink, File},
-	io::{copy, AsyncWriteExt, BufWriter}, task::JoinSet,
+	fs::{File, create_dir_all, symlink},
+	io::{AsyncWriteExt, BufWriter, copy},
+	task::JoinSet,
 };
 
 use url::Url;
@@ -253,33 +254,24 @@ async fn download_metadata_inner(
 				.await?
 				.is_ok()
 			{
-				tokio::task::spawn_blocking(move || {
+				let _ = tokio::task::spawn_blocking(move || {
 					info!(
 						"[{}/{}] '{}' is up to date.",
 						f.1.0,
 						total_files,
 						rel_path.display()
 					);
-					std::fs::copy(local_file.as_path(), tmpdist_local_file.as_path())
-						.context(format!(
-							"Failed to copy '{}' to '{}'",
-							local_file.display(),
-							tmpdist_local_file.display()
-						))
-				}).await??;
-				// info!(
-				// 	"[{}/{}] '{}' is up to date.",
-				// 	f.1.0,
-				// 	total_files,
-				// 	rel_path.display()
-				// );
-				// tokio::fs::copy(local_file.as_path(), tmpdist_local_file.as_path())
-				// 	.await
-				// 	.context(format!(
-				// 		"Failed to copy '{}' to '{}'",
-				// 		local_file.display(),
-				// 		tmpdist_local_file.display()
-				// 	))?;
+					std::fs::copy(
+						local_file.as_path(),
+						tmpdist_local_file.as_path(),
+					)
+					.context(format!(
+						"Failed to copy '{}' to '{}'",
+						local_file.display(),
+						tmpdist_local_file.display()
+					))
+				})
+				.await??;
 				continue;
 			};
 		}
@@ -394,7 +386,7 @@ pub async fn download_metadata_files(
 	}
 	while let Some(r) = handles.join_next().await {
 		r??;
-	};
+	}
 	info!("Finished downloading metadata.");
 	Ok(())
 }
@@ -486,7 +478,7 @@ pub fn get_files(
 	timestamp: i64,
 ) -> Result<PackageFileList> {
 	info!("Collecting files from {} dists ...", suites.len());
-	let mut files = Vec::new();
+	let mut files = Vec::with_capacity(75_000 * suites.len());
 	for suite in &suites {
 		for component in suite.1 {
 			let temp_dists_dir = mirror_root
@@ -508,7 +500,7 @@ pub fn get_files(
 				};
 				let reader = get_reader(&packages_path)?;
 				let mut lines = reader.lines();
-				let mut ent_path = String::new();
+				let mut ent_path = String::with_capacity(256);
 				let mut ent_size: u64 = 0;
 				// Not using deb822 to save energy.
 				while let Some(Ok(l)) = lines.next() {
@@ -517,7 +509,7 @@ pub fn get_files(
 							"Expected Filename: value not found",
 						)?;
 						debug!("New file: {}", path);
-						ent_path = path.into();
+						ent_path.push_str(path);
 					}
 					if l.starts_with("Size: ") {
 						let size = l.split_whitespace().nth(1).context(
@@ -532,6 +524,7 @@ pub fn get_files(
 							path: ent_path.clone(),
 							size: ent_size,
 						});
+						ent_path.clear();
 					}
 				}
 			}

@@ -2,7 +2,10 @@ use std::sync::Arc;
 
 use ed25519_dalek::VerifyingKey;
 use reqwest::Client;
-use tokio::{sync::mpsc::{Receiver, Sender}, task::JoinHandle};
+use tokio::{
+	sync::mpsc::{Receiver, Sender},
+	task::JoinHandle,
+};
 
 use crate::{config::AppConfig, server::Status, verify::PgpKeyringStore};
 
@@ -30,5 +33,5 @@ pub struct AppState {
 	pub server_pubkeys: Arc<Vec<VerifyingKey>>,
 	// reqwest uses Arc internally.
 	pub client: Client,
-	pub sender: JoinHandleSender
+	pub sender: JoinHandleSender,
 }

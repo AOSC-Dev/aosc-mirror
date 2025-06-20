@@ -19,13 +19,22 @@ use tokio::{
 	io::{AsyncWriteExt, BufWriter},
 	process::Command,
 	sync::RwLock,
+	task::JoinSet,
 };
 use url::Url;
 
 use crate::{
-	aosc::fetch_topics, config::OperationMode, debian::collect_source_files, metadata::{
-		download_metadata_files, fetch_manifest, get_files, split_inrelease, AptRepoReleaseInfo
-	}, server::{Status, SyncRequestBody, SyncRequestResponse}, utils::scan_delta, verify::{verify_pgp_signature, verify_request_signature, PgpKeyringStore}, AppState
+	AppState,
+	aosc::fetch_topics,
+	config::OperationMode,
+	debian::collect_source_files,
+	metadata::{
+		AptRepoReleaseInfo, download_metadata_files, fetch_manifest, get_files,
+		split_inrelease,
+	},
+	server::{Status, SyncRequestBody, SyncRequestResponse},
+	utils::scan_delta,
+	verify::{PgpKeyringStore, verify_pgp_signature, verify_request_signature},
 };
 
 #[derive(Debug, Clone)]
@@ -196,7 +205,6 @@ async fn do_sync_inner2(j: SyncJob<'_>) -> Result<()> {
 	// Download manifests and metadata to dists-TIMESTAMP/SUITE.
 	let manifests = download_metadata(&j).await?;
 
-	// Collect available files; get_files returns the chunked lists along with hashed file list
 	let rsync_url = j.rsync_url.clone();
 	let dst = j.dst.to_path_buf().clone();
 	let cur_dists_dir = dst.join(format!("dists-{}", j.timestamp));
@@ -208,15 +216,21 @@ async fn do_sync_inner2(j: SyncJob<'_>) -> Result<()> {
 	let archs = j.archs.clone();
 	let suites2 = suites.clone();
 	let mut files_collected =
-		tokio::task::spawn_blocking(move || get_files(dst, suites2, archs, j.timestamp)).await??;
+		tokio::task::spawn_blocking(move || get_files(dst, suites2, archs, j.timestamp))
+			.await??;
 	if j.mode == OperationMode::Debian && j.mirror_sources {
-		// let source_files = collect_source_files(cur_dists_dir, suites, j.threads).await?;
-		// files_collected.extend(source_files);
-		let mut source_files = collect_source_files(cur_dists_dir, suites, j.threads).await?;
+		let mut source_files =
+			collect_source_files(cur_dists_dir, suites, j.threads).await?;
 		files_collected.append(&mut source_files);
 	}
 
-	let hashset: HashSet<String> = files_collected.iter().map(|e| e.path.clone()).collect();
+	let mut hashset: HashSet<String> = HashSet::with_capacity(files_collected.capacity());
+	files_collected
+		.iter()
+		.map(|e| e.path.clone())
+		.for_each(|e| {
+			hashset.insert(e);
+		});
 	files_collected.sort_by_key(|e| e.path.clone());
 	info!("Collected {} files in total.", files_collected.len());
 	info!("Scanning for incremental deltas ...");
@@ -228,15 +242,13 @@ async fn do_sync_inner2(j: SyncJob<'_>) -> Result<()> {
 		.chunks(each_size)
 		.for_each(|x| scan_queues.push(x.to_vec()));
 	let mut delta = Vec::new();
-	let mut tasks = Vec::new();
+	let mut tasks = JoinSet::new();
 	for queue in scan_queues {
 		let root = j.dst.to_owned();
-		tasks.push(tokio::task::spawn_blocking(move || {
-			scan_delta(&root, &queue)
-		}))
+		tasks.spawn_blocking(move || scan_delta(&root, &queue));
 	}
-	for task in tasks {
-		delta.extend(task.await?);
+	while let Some(task) = tasks.join_next().await {
+		delta.extend(task?);
 	}
 	// We don't need the sizes any more.
 	drop(files_collected);
@@ -304,8 +316,10 @@ async fn do_sync_inner2(j: SyncJob<'_>) -> Result<()> {
 
 	// Remove unused files
 	let root = j.dst.to_path_buf();
-	tokio::task::spawn_blocking(move || remove_unused_files(root, j.timestamp, hashset))
-		.await??;
+	tokio::task::spawn_blocking(move || {
+		remove_unused_files(root, j.timestamp, hashset)
+	})
+	.await??;
 
 	let local: DateTime<Local> = Local::now();
 	info!("Sync finished successfully at {}", local);

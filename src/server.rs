@@ -8,7 +8,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
-use crate::{sync::do_sync, AppState};
+use crate::{AppState, sync::do_sync};
 
 #[derive(Copy, Clone, Deserialize, PartialEq, Serialize, Debug)]
 #[serde(rename_all = "lowercase")]

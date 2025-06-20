@@ -29,12 +29,12 @@ use verify::{init_pgp_keyringstore, verify_pgp_signature};
 use crate::{config::check_config, metadata::AptRepoReleaseInfo};
 pub use server::SyncRequestBody;
 
-// #[cfg(not(target_env = "msvc"))]
-// use tikv_jemallocator::Jemalloc;
+#[cfg(not(target_env = "msvc"))]
+use tikv_jemallocator::Jemalloc;
 
-// #[cfg(not(target_env = "msvc"))]
-// #[global_allocator]
-// static GLOBAL: Jemalloc = Jemalloc;
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
 
 #[derive(Clone, Subcommand)]
 /// The Mirror Sync Client
@@ -62,7 +62,12 @@ fn check_repo(root: &dyn AsRef<Path>, manifests: Vec<AptRepoReleaseInfo>) -> boo
 		let files = manifest.metadata_info.first().unwrap();
 		for f in &files.files {
 			let full_path = suite_dir.join(&f.path);
-			if full_path.extension().is_some_and(|e| ["gz", "xz", "bz2"].iter().any(|x| e.eq_ignore_ascii_case(x))) && !full_path.is_file() {
+			if full_path.extension().is_some_and(|e| {
+				["gz", "xz", "bz2"]
+					.iter()
+					.any(|x| e.eq_ignore_ascii_case(x))
+			}) && !full_path.is_file()
+			{
 				return false;
 			}
 		}
@@ -73,7 +78,7 @@ fn check_repo(root: &dyn AsRef<Path>, manifests: Vec<AptRepoReleaseInfo>) -> boo
 async fn consume_handles(mut rx: JoinHandleReceiver) -> Result<()> {
 	while let Some(h) = rx.recv().await {
 		info!("New sync task spawned.");
-		h.await?
+		std::mem::drop(h);
 	}
 	Ok(())
 }
@@ -247,9 +252,7 @@ async fn main() -> Result<()> {
 			};
 			// Start the server
 			info!("Starting server ...");
-			tokio::spawn(async move {
-				consume_handles(rx).await
-			});
+			tokio::spawn(async move { consume_handles(rx).await });
 			let s = build_server(state)
 				.into_make_service_with_connect_info::<SocketAddr>();
 			let mut tasks = JoinSet::new();

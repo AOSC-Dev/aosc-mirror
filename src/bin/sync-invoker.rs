@@ -184,7 +184,10 @@ async fn main() -> Result<()> {
 			timeout,
 			endpoints,
 		} => {
-			env_logger::init();
+			env_logger::builder()
+				.filter_level(log::LevelFilter::Info)
+				.parse_default_env()
+				.init();
 			let mut endpoints_vec = Vec::new();
 			if let Some(l) = endpoint_list {
 				let endpoints_fd = read_to_string(l)

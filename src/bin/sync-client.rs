@@ -85,7 +85,10 @@ async fn consume_handles(mut rx: JoinHandleReceiver) -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-	env_logger::init();
+	env_logger::builder()
+		.filter_level(log::LevelFilter::Info)
+		.parse_default_env()
+		.init();
 	// console_subscriber::init();
 	info!("AOSC OS Mirror Sync Client");
 	info!("Please wait, while we perform some checks ...");
@@ -246,7 +249,7 @@ async fn main() -> Result<()> {
 		AppAction::Daemon => {
 			info!("Checking the repository ...");
 			if !check_repo(&config.mirror_root, manifests) {
-				bail!("Looks like you don't have a full copy of the mirrored repository.\n".to_owned() + 
+				bail!("Looks like you don't have a full copy of the mirrored repository.\n".to_owned() +
 				"Please run the following command to initialize a full copy:\n\n" +
 				&format!("{} -c {} sync", argv0, config_file.display()));
 			};

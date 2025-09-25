@@ -153,13 +153,17 @@ pub async fn do_sync_inner(s: Arc<RwLock<AppState>>, timestamp: i64) {
 			if !c.mirror_topics {
 				vec!["stable".into()]
 			} else {
-				let mut topics = fetch_topics(client.clone())
-					.await
-					.context("Unable to fetch the topic manifest")
-					.unwrap()
-					.into_iter()
-					.map(|x| x.name)
-					.collect::<Vec<_>>();
+				let mut topics = fetch_topics(
+					&c.http_url,
+					c.mirror_root.clone(),
+					client.clone(),
+				)
+				.await
+				.context("Unable to fetch the topic manifest")
+				.unwrap()
+				.into_iter()
+				.map(|x| x.name)
+				.collect::<Vec<_>>();
 				info!("Manifest has {} topics.", topics.len());
 				topics.push("stable".into());
 				topics

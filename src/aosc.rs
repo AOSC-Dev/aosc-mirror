@@ -1,6 +1,10 @@
+use std::{fs::{create_dir_all, File}, io::Write, path::PathBuf};
+
 use anyhow::Result;
+use log::info;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use url::Url;
 
 /// Represents a topic. Serializes to /var/lib/atm/state.
 #[derive(Deserialize, Serialize, Clone)]
@@ -23,14 +27,25 @@ pub struct Topic {
 	pub draft: bool,
 }
 
-// If you want to use downstream mirrors for fetch topic manifests, you
-// shouldn't use this program anyway.
-const TOPIC_MANIFEST_URL: &str = "https://repo-hk.aosc.io/debs/manifest/topics.json";
-
-pub async fn fetch_topics(client: Client) -> Result<Vec<Topic>> {
-	eprintln!("Fetching topics manifest ...");
-	let response = client.get(TOPIC_MANIFEST_URL).send().await?;
+pub async fn fetch_topics(
+	mirror_url: &Url,
+	dest: PathBuf,
+	client: Client,
+) -> Result<Vec<Topic>> {
+	info!("Fetching topics manifest ...");
+	let full_url = mirror_url.join("manifest/topics.json")?;
+	let response = client.get(full_url).send().await?;
 	response.error_for_status_ref()?;
-	let topics: Vec<Topic> = serde_json::from_str(&response.text().await?)?;
+	let content = &response.text().await?;
+	let topics: Vec<Topic> = serde_json::from_str(content)?;
+	let save_path = dest.join("manifest/");
+	create_dir_all(&save_path)?;
+	let save_path = save_path.join("topics.json");
+	let mut fd = File::options()
+		.create(true)
+		.truncate(true)
+		.write(true)
+		.open(&save_path)?;
+	fd.write_all(content.as_bytes())?;
 	Ok(topics)
 }
